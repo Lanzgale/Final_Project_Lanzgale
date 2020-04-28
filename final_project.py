@@ -100,6 +100,8 @@ def get_table_names(soup):
 
 def process_mixed_data(mixed_data, table_names):
     # The values in the dict is a list of lists.
+    # The dictionary looks like this:
+        # <table_names>: [[field_name, data, data, data],[...],...]
     mark = []
     for i in range(len(mixed_data)):
         if mixed_data[i][0] in table_names or mixed_data[i][0] == ' ':
@@ -148,7 +150,7 @@ def make_soup_with_cache(url):
     return soup
 
 
-##   CREATE DATABASE
+##   CREATING DATABASE
 
 def create_db(data_dict):
 
@@ -185,20 +187,22 @@ def create_db(data_dict):
     conn.commit()
     conn.close()
 
-#   PROCESSING TABLE NAMES AND FIELD NAMES
+#   PROCESSING TABLE NAMES AND FIELD NAMES -- ACTUALLY I FIND IT IS NOT NECESSARY AT ALL!
 
 def make_sq_data_dict(data_dict):
-
+    """
     # Get the proper table names.
     sq_data_dict = {}
     for key, val in data_dict.items():
-        # also change the keys
+        # change the keys
         sq_data_dict[process_table_names(key)] = val
 
     # Get the proper field names.
     sq_data_dict = process_field_name(sq_data_dict)
 
     return sq_data_dict
+    """
+    return data_dict
 
 def process_table_names(table_name):
 
@@ -236,13 +240,11 @@ def save_data(country_name, data_dict):
     sq_data_dict = make_sq_data_dict(data_dict)
     sq_data_dict = process_strange_values(sq_data_dict)
 
-    print(sq_data_dict)
-
     save_queries = []
     for key, val in sq_data_dict.items():
         # save different years separately
         for i in range(len(val[0])):
-            query = f'INSERT INTO {key} VALUES (NULL, "{country_name}"'
+            query = f'INSERT INTO "{key}" VALUES (NULL, "{country_name}"'
             # exclude the index of field names
             if i != 0:
                 for field in val:
@@ -253,7 +255,6 @@ def save_data(country_name, data_dict):
                     else:
                         query += f", NULL"
                 query += ')'
-                print(query)
                 save_queries.append(query)
 
     for sq in save_queries:
@@ -281,18 +282,7 @@ def process_strange_values(sq_data_dict):
                                 no_comma += k
                         val[i][j] = no_comma
 
-
     return sq_data_dict
-
-
-
-### PRESENTATION
-
-
-##  WEB PAGE SETUP
-
-
-##  PLOTTING
 
 
 
@@ -300,23 +290,207 @@ def process_strange_values(sq_data_dict):
 
 def main():
 
+    print("Start")
+
     # Create database
     country_url = get_country_url()
     country_sample = 'Afghanistan'
     data_dict = get_data(country_sample, country_url)
     create_db(data_dict)
+    print("Database created")
+
+    # Take down the fields recorded and field-table relation
+    field_list = []
+    table_field = {}
+    for key, val in data_dict.items():
+        fields = []
+        # for the index of every field
+        for i in range(len(val)):
+            field_list.append(val[i][0])
+            fields.append(val[i][0])
+        table_field[key] = fields
+    print("The valid fields and tables are:")
+    print(field_list)
+    print(table_field)
+    # These will be used as a global variable by a function later.
 
     # Get the data of all the countries
+    # Take down the countries recorded
+    country_list = []
     for country_name in country_url:
         try:
             data_dict = get_data(country_name, country_url)
             save_data(country_name, data_dict)
+            country_list.append(country_name)
         except TypeError:
             continue
-        if country_name == 'Canada':
+        if len(country_list) == 4:
             break
+    print("Data of following countries are collected:")
+    print(country_list)
+    # This will also be used later.
+
+
+    ##  WEB PAGE SETUP
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def entrance():
+
+        return render_template('entrance.html')
+
+    @app.route('/plotform')
+    def plotform():
+
+        return render_template('plotform.html',
+                               field_list=field_list,
+                               country_list=country_list)
+
+    @app.route('/plotresult', methods=['POST'])
+    def plotresult():
+
+        field = request.form["fields"]
+        countries = []
+        for k in request.form.keys():
+            countries.append(k)
+
+        data = get_results_for_plot(field, countries)
+
+        # Create traces
+        layout = go.Layout(title=f"{field}")
+        fig = go.Figure(layout=layout)
+        for c in countries:
+            xvals = []
+            yvals = []
+            # for each result
+            for d in data:
+                # check the country is c
+                if c in d:
+                    xvals.append(d[1])
+                    yvals.append(d[2])
+            fig.add_trace(go.Scatter(x=xvals, y=yvals,
+                                     mode='lines+markers',
+                                     name=f'{c}'))
+        div = fig.to_html(full_html=False)
+
+        return render_template('plotresult.html', chart=div)
+
+    @app.route('/tableform')
+    def tableform():
+
+        return render_template('tableform.html',
+                               field_list=field_list,
+                               country_list=country_list)
+
+    @app.route('/tableresult', methods=['POST'])
+    def tableresult():
+
+        countries = []
+        fields = []
+        sort_by = 0
+        for k in request.form.keys():
+            if k in country_list:
+                countries.append(k)
+            if k in field_list:
+                fields.append(k)
+            if k in ['Countries', 'Years']:
+                sort_by = ['Countries', 'Years'].index(k)
+
+        data = get_results_for_table(fields, countries,
+                                     sort_by)
+        for i in range(len(data)):
+            detuple = []
+            for j in range(len(data[i])):
+                if data[i][j] is None:
+                    detuple.append('N\A')
+                else:
+                    detuple.append(data[i][j])
+            data[i] = detuple
+
+        return render_template('tableresult.html',
+                               data=data,
+                               fields=fields)
+
+    #  READING DATA
+
+    def get_results_for_plot(field, countries):
+
+        conn = sqlite3.connect(DB_FILENAME)
+        cur = conn.cursor()
+
+        table_name = get_table_for_field(field)
+
+        query = f'''
+            SELECT Country, Year, "{field}"
+            FROM "{table_name}"
+            WHERE 
+        '''
+        for c in countries:
+            query += f'Country = "{c}" OR '
+        query = query[:-3]
+
+        results = cur.execute(query).fetchall()
+        conn.close()
+
+        return results
+
+    def get_results_for_table(fields, countries, sort_by):
+
+        conn = sqlite3.connect(DB_FILENAME)
+        cur = conn.cursor()
+
+        tables = []
+        for f in fields:
+            table_name = get_table_for_field(f)
+            tables.append(table_name)
+
+        uniq_table = []
+        for t in tables:
+            if t not in uniq_table:
+                uniq_table.append(t)
+
+        query = f'SELECT "{tables[0]}".Country, "{tables[0]}".Year, '
+        for f in fields:
+            query += f'"{get_table_for_field(f)}"."{f}", '
+        query = query[:-2]
+        query += ' FROM '
+        if len(uniq_table) > 1:
+            for u in uniq_table:
+                query += f'"{u}" JOIN '
+            query = query[:-5]
+            query += 'ON '
+            for u in uniq_table:
+                query += f'"{u}"."#" = '
+            query = query[:-2]
+        else:
+            query += f'"{tables[0]}" '
+        query += 'WHERE '
+        for c in countries:
+            query += f'"{tables[0]}".Country = "{c}" OR '
+        query = query[:-3]
+        if sort_by == 0:
+            query += f'ORDER BY "{tables[0]}".Country '
+        if sort_by == 1:
+            query += f'ORDER BY "{tables[0]}".Year '
+        print(query)
+        results = cur.execute(query).fetchall()
+        conn.close()
+
+        return results
+
+    def get_table_for_field(field):
+
+        table_name = ''
+        for key, val in table_field.items():
+            if field in val:
+                table_name = key
+
+        return table_name
 
     # Construct the web page
+    app.run(debug=True, use_reloader = False)
+    print("Web page ready")
 
 if __name__ == '__main__':
 
